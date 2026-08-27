@@ -133,46 +133,97 @@ export async function commitOrderStock(lines: { variantId: string; qty: number }
   });
 }
 
-/** Reserve stock for an in-progress checkout (does not touch stockQuantity, only the reserved counter). */
-export async function reserveStock(variantId: string, qty: number): Promise<DbVariant> {
-  return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-    // Same atomic-increment-then-verify pattern as deductStockForOrderLines,
-    // and for the same reason — reading availableStock first and only
-    // then incrementing reservedStock is racy under concurrent reservations.
+/**
+ * Creates one InventoryReservation row per line and atomically holds
+ * that stock — increments Variant.reservedStock and verifies it doesn't
+ * exceed real stockQuantity, all within the caller's transaction, so
+ * either every line in a checkout attempt reserves or none do. Because
+ * this is the same atomic-update-then-verify pattern used everywhere
+ * else in this file, two concurrent checkouts racing for the last unit
+ * serialise on the row lock exactly like a real stock deduction would —
+ * whichever commits second sees the already-incremented reservedStock
+ * and fails cleanly instead of both succeeding.
+ */
+export async function createReservations(
+  tx: Prisma.TransactionClient,
+  checkoutAttemptId: string,
+  lines: { variantId: string; qty: number }[],
+  expiresAt: Date,
+): Promise<void> {
+  for (const line of lines) {
     const variant = await tx.variant.update({
-      where: { id: variantId },
-      data: { reservedStock: { increment: qty } },
+      where: { id: line.variantId },
+      data: { reservedStock: { increment: line.qty } },
     });
 
     if (variant.reservedStock > variant.stockQuantity) {
-      throw new InsufficientStockError(variantId);
+      throw new InsufficientStockError(line.variantId);
     }
 
-    return variant;
-  });
-}
-
-/** Release a reservation without committing it (e.g. checkout abandoned/expired). */
-export async function releaseReservedStock(variantId: string, qty: number): Promise<DbVariant> {
-  return prisma.variant.update({ where: { id: variantId }, data: { reservedStock: { decrement: qty } } });
-}
-
-/** Commit a reservation into a permanent deduction (e.g. payment confirmed). */
-export async function commitReservedStock(variantId: string, qty: number): Promise<DbVariant> {
-  return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-    const reserved = await tx.variant.update({ where: { id: variantId }, data: { reservedStock: { decrement: qty } } });
-    if (reserved.reservedStock < 0) {
-      throw new InsufficientStockError(variantId);
-    }
-
-    const variant = await tx.variant.update({ where: { id: variantId }, data: { stockQuantity: { decrement: qty } } });
-    if (variant.stockQuantity < 0) {
-      throw new InsufficientStockError(variantId);
-    }
-
-    await tx.stockMovement.create({
-      data: { variantId, delta: -qty, reason: "ORDER_COMMITTED" },
+    await tx.inventoryReservation.create({
+      data: { checkoutAttemptId, variantId: line.variantId, qty: line.qty, expiresAt, status: "ACTIVE" },
     });
-    return variant;
+  }
+}
+
+/**
+ * Releases every currently-ACTIVE reservation belonging to a checkout
+ * attempt back to available stock (payment failed/expired/was
+ * cancelled). Idempotent by construction — only ACTIVE rows are
+ * touched, so calling this again for an attempt that's already been
+ * released (or whose reservations were already consumed by a
+ * successful payment) does nothing on the second call.
+ */
+export async function releaseReservationsForAttempt(
+  checkoutAttemptId: string,
+  toStatus: "RELEASED" | "EXPIRED" = "RELEASED",
+): Promise<void> {
+  await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    const active = await tx.inventoryReservation.findMany({
+      where: { checkoutAttemptId, status: "ACTIVE" },
+    });
+    for (const reservation of active) {
+      await tx.variant.update({
+        where: { id: reservation.variantId },
+        data: { reservedStock: { decrement: reservation.qty } },
+      });
+      await tx.inventoryReservation.update({ where: { id: reservation.id }, data: { status: toStatus } });
+    }
   });
+}
+
+/**
+ * Converts every ACTIVE reservation for a checkout attempt into a
+ * permanent stock deduction — releases the hold on reservedStock and
+ * decrements real stockQuantity in the same transaction as order
+ * finalisation (see lib/payments/webhook.ts), writing the usual
+ * ORDER_COMMITTED audit trail. Only ACTIVE rows are selected, so this
+ * is safe to call from a webhook handler that might receive the same
+ * "payment succeeded" event more than once — the second call finds
+ * nothing ACTIVE left to consume and does nothing.
+ */
+export async function consumeReservationsForAttempt(
+  tx: Prisma.TransactionClient,
+  checkoutAttemptId: string,
+  note: string,
+): Promise<void> {
+  const active = await tx.inventoryReservation.findMany({
+    where: { checkoutAttemptId, status: "ACTIVE" },
+  });
+  for (const reservation of active) {
+    const variant = await tx.variant.update({
+      where: { id: reservation.variantId },
+      data: {
+        reservedStock: { decrement: reservation.qty },
+        stockQuantity: { decrement: reservation.qty },
+      },
+    });
+    if (variant.stockQuantity < 0) {
+      throw new InsufficientStockError(reservation.variantId);
+    }
+    await tx.stockMovement.create({
+      data: { variantId: reservation.variantId, delta: -reservation.qty, reason: "ORDER_COMMITTED", note },
+    });
+    await tx.inventoryReservation.update({ where: { id: reservation.id }, data: { status: "CONSUMED" } });
+  }
 }

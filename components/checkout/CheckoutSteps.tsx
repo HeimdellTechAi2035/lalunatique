@@ -6,8 +6,8 @@ export type CheckoutStepId = "information" | "shipping" | "payment" | "review";
 const steps: { id: CheckoutStepId; label: string }[] = [
   { id: "information", label: "Information" },
   { id: "shipping", label: "Shipping" },
-  { id: "payment", label: "Payment" },
   { id: "review", label: "Review" },
+  { id: "payment", label: "Payment" },
 ];
 
 export function CheckoutSteps({ current }: { current: CheckoutStepId }) {

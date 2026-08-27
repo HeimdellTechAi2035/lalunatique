@@ -25,6 +25,7 @@ export function CheckoutFlow() {
   const [address, setAddress] = useState<CheckoutAddressValues | null>(null);
   const [shippingMethodId, setShippingMethodId] = useState<ShippingMethodId>("standard");
   const [promoCode, setPromoCode] = useState("");
+  const [clientSecret, setClientSecret] = useState<string | null>(null);
 
   function goTo(next: CheckoutStepId) {
     router.push(`/checkout?step=${next}`);
@@ -61,15 +62,35 @@ export function CheckoutFlow() {
               onNext={(values) => {
                 setShippingMethodId(values.shippingMethodId);
                 setPromoCode(values.promoCode);
-                goTo("payment");
+                goTo("review");
               }}
             />
           ) : null}
 
-          {step === "payment" ? <PaymentStep onBack={() => goTo("shipping")} onNext={() => goTo("review")} /> : null}
+          {step === "payment" && clientSecret ? (
+            <PaymentStep clientSecret={clientSecret} onBack={() => goTo("review")} />
+          ) : null}
+          {step === "payment" && !clientSecret ? (
+            <p className="text-sm text-muted">
+              Please complete the{" "}
+              <button type="button" className="underline" onClick={() => goTo("review")}>
+                review step
+              </button>{" "}
+              first.
+            </p>
+          ) : null}
 
           {step === "review" && address ? (
-            <ReviewStep address={address} shippingMethodId={shippingMethodId} promoCode={promoCode} onBack={() => goTo("payment")} />
+            <ReviewStep
+              address={address}
+              shippingMethodId={shippingMethodId}
+              promoCode={promoCode}
+              onBack={() => goTo("shipping")}
+              onReadyForPayment={(secret) => {
+                setClientSecret(secret);
+                goTo("payment");
+              }}
+            />
           ) : null}
 
           {step === "review" && !address ? (

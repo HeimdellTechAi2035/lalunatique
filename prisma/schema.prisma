@@ -120,6 +120,7 @@ model Variant {
   updatedAt DateTime @updatedAt
 
   stockMovements StockMovement[]
+  reservations   InventoryReservation[]
 
   @@index([productId])
 }
@@ -132,6 +133,35 @@ enum StockMovementReason {
   ORDER_COMMITTED
   RETURN
   CORRECTION
+}
+
+enum ReservationStatus {
+  ACTIVE
+  CONSUMED
+  RELEASED
+  EXPIRED
+}
+
+// Holds stock for an in-progress payment without permanently deducting
+// it. `Variant.reservedStock` is kept in lockstep with ACTIVE rows here
+// (see lib/products/inventory.ts) — availableStock() = stockQuantity -
+// reservedStock is already what the entire public read layer shows, so
+// a reservation makes a unit unavailable to every other shopper the
+// moment it's created, without touching real stock until payment is
+// actually confirmed by webhook.
+model InventoryReservation {
+  id                String   @id @default(cuid())
+  checkoutAttemptId String
+  checkoutAttempt   CheckoutAttempt   @relation(fields: [checkoutAttemptId], references: [id], onDelete: Cascade)
+  variantId         String
+  variant           Variant           @relation(fields: [variantId], references: [id])
+  qty               Int
+  status            ReservationStatus @default(ACTIVE)
+  createdAt         DateTime          @default(now())
+  expiresAt         DateTime
+
+  @@index([variantId, status])
+  @@index([checkoutAttemptId])
 }
 
 // Append-only audit trail — every stock change is recorded here rather
@@ -176,10 +206,11 @@ model User {
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
-  sessions  Session[]
-  accounts  Account[]
-  addresses Address[]
-  orders    Order[]
+  sessions         Session[]
+  accounts         Account[]
+  addresses        Address[]
+  orders           Order[]
+  checkoutAttempts CheckoutAttempt[]
 
   @@map("user")
 }
@@ -283,6 +314,101 @@ enum PaymentStatus {
   REFUNDED
 }
 
+enum CheckoutAttemptStatus {
+  PENDING
+  COMPLETED
+  EXPIRED
+  FAILED
+  CANCELED
+}
+
+// A payment-in-progress. Created the moment a customer commits to pay
+// (with stock already reserved — see InventoryReservation), and only
+// ever turns into a real Order once Stripe's webhook confirms payment
+// (lib/payments/webhook.ts) — never from the browser returning to the
+// success page. Deliberately holds its own price/address snapshot
+// (identical shape to Order) rather than pointing back at the cart, so
+// what Stripe actually charged is exactly what gets copied onto the
+// Order at finalisation.
+model CheckoutAttempt {
+  id             String @id @default(cuid())
+  // Set once, client-side, when the customer reaches the payment step,
+  // and reused across retries of that same click — the uniqueness
+  // constraint is what makes a duplicate submission (double-click,
+  // network retry) return the existing attempt instead of creating a
+  // second reservation/session for the same basket.
+  idempotencyKey String @unique
+
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id])
+
+  email String
+  phone String?
+
+  shippingName     String
+  shippingLine1    String
+  shippingLine2    String?
+  shippingCity     String
+  shippingPostcode String
+  shippingCountry  String
+
+  shippingMethodId String
+  promoCode        String?
+
+  subtotalInPence Int
+  discountInPence Int
+  shippingInPence Int
+  totalInPence    Int
+
+  status CheckoutAttemptStatus @default(PENDING)
+
+  stripeCheckoutSessionId String? @unique
+  stripePaymentIntentId   String?
+
+  lines        CheckoutAttemptLine[]
+  reservations InventoryReservation[]
+  order        Order?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  // Mirrors the Stripe Checkout Session's own expires_at (minimum 30
+  // minutes — Stripe's floor, not an arbitrarily invented hold time).
+  // Reservations are released once this passes, whether via the
+  // checkout.session.expired webhook or the cleanup sweep in
+  // lib/payments/reservation-cleanup.ts.
+  expiresAt DateTime
+
+  @@index([userId])
+  @@index([status, expiresAt])
+}
+
+model CheckoutAttemptLine {
+  id                String          @id @default(cuid())
+  checkoutAttemptId String
+  checkoutAttempt   CheckoutAttempt @relation(fields: [checkoutAttemptId], references: [id], onDelete: Cascade)
+
+  productSlug  String
+  productName  String
+  variantId    String
+  variantSku   String?
+  variantLabel String?
+
+  qty              Int
+  unitPriceInPence Int
+  lineTotalInPence Int
+}
+
+// Deduplicates Stripe webhook deliveries — Stripe guarantees
+// at-least-once delivery, so the same event id can arrive more than
+// once. The id itself (Stripe's own event id, e.g. evt_...) is the
+// primary key, so a second delivery fails to insert and is skipped
+// before any order/inventory mutation runs.
+model ProcessedWebhookEvent {
+  id          String   @id
+  type        String
+  processedAt DateTime @default(now())
+}
+
 model Order {
   id          String  @id @default(cuid())
   orderNumber String  @unique
@@ -294,6 +420,9 @@ model Order {
   // lib/account/link-orders.ts) — never trust the email field alone.
   userId String?
   user   User?   @relation(fields: [userId], references: [id])
+
+  checkoutAttemptId String?          @unique
+  checkoutAttempt   CheckoutAttempt? @relation(fields: [checkoutAttemptId], references: [id])
 
   email String
   phone String?
@@ -312,6 +441,18 @@ model Order {
   discountInPence Int @default(0)
   shippingInPence Int
   totalInPence    Int
+
+  // Stripe references + payment ledger — never card data, only Stripe's
+  // own identifiers/amounts. amountRefundedInPence is the running total
+  // across however many partial refunds have been issued; a refund is
+  // only ever recorded here after the actual Stripe refund call
+  // succeeds (see lib/payments/refunds.ts) — never by editing this
+  // field directly.
+  stripeCheckoutSessionId String?   @unique
+  stripePaymentIntentId   String?
+  amountPaidInPence       Int?
+  amountRefundedInPence   Int       @default(0)
+  paidAt                  DateTime?
 
   trackingNumber String?
 

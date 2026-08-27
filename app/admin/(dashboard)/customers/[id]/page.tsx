@@ -91,6 +91,9 @@ export default async function AdminCustomerDetailPage({ params }: { params: Prom
                   <div className="flex items-center gap-2">
                     <Badge variant={statusVariant[order.status]}>{order.status.toLowerCase()}</Badge>
                     <span className="text-sm font-medium text-ink">{formatPrice(order.totalInPence)}</span>
+                    <Link href={`/admin/orders/${order.id}`} className="text-xs font-medium text-accent hover:underline">
+                      View payment →
+                    </Link>
                   </div>
                 </div>
                 <ul className="mt-3 space-y-1 border-t border-border pt-3 text-sm text-muted">

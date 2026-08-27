@@ -74,6 +74,17 @@ export async function getOrderById(id: string, userId: string): Promise<Order | 
   return order ? toOrder(order) : undefined;
 }
 
+// Used only by the post-payment confirmation page, keyed on Stripe's
+// own Checkout Session id — a long, unguessable, Stripe-generated
+// token, not the short human-readable orderNumber. Never add a
+// fallback lookup path here by orderNumber/order id alone; that would
+// reopen exactly the "guess another customer's order" hole this
+// replaced (see app/order-confirmation/page.tsx).
+export async function getOrderByStripeSessionId(stripeCheckoutSessionId: string): Promise<Order | undefined> {
+  const order = await prisma.order.findUnique({ where: { stripeCheckoutSessionId }, include });
+  return order ? toOrder(order) : undefined;
+}
+
 export async function getOrderByNumber(orderNumber: string): Promise<Order | undefined> {
   // Order numbers are always generated upper-case (see lib/checkout/actions.ts);
   // normalising here avoids relying on a case-insensitive query mode that

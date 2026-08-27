@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { getAdminDashboardStats } from "@/lib/admin/products/queries";
+import { calculateTotalRevenueInPence } from "@/lib/admin/orders/queries";
 import { prisma } from "@/lib/db/prisma";
 import { formatPrice } from "@/lib/utils/format";
 import { Card } from "@/components/ui/card";
@@ -12,9 +13,9 @@ export default async function AdminDashboardPage() {
     getAdminDashboardStats(),
     prisma.order.count(),
     prisma.user.count({ where: { role: "CUSTOMER" } }),
-    prisma.order.findMany({ select: { totalInPence: true } }),
+    prisma.order.findMany({ select: { amountPaidInPence: true, amountRefundedInPence: true, totalInPence: true } }),
   ]);
-  const totalRevenueInPence = orders.reduce((sum, o) => sum + o.totalInPence, 0);
+  const totalRevenueInPence = calculateTotalRevenueInPence(orders);
 
   const tiles = [
     { label: "Orders", value: orderCount },
@@ -45,6 +46,9 @@ export default async function AdminDashboardPage() {
       </div>
 
       <div className="mt-8 flex gap-4">
+        <Link href="/admin/orders" className="text-sm font-medium text-accent hover:underline">
+          View orders →
+        </Link>
         <Link href="/admin/products" className="text-sm font-medium text-accent hover:underline">
           Manage products →
         </Link>

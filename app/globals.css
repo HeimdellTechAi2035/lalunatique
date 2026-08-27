@@ -1,0 +1,68 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Helvetica Neue", Arial, ui-sans-serif, system-ui, sans-serif;
+
+  /* La Lunatique brand palette — sampled from the real logo (rose gold on near-black) */
+  --color-ink: #17110f;
+  --color-surface-dark: #17110f;
+  --color-surface-dark-raised: #241a17;
+  --color-cream: #faf5f1;
+  --color-paper: #ffffff;
+  --color-border: #e7dcd4;
+  --color-muted: #6f645d;
+  --color-accent: #b9805c;
+  --color-accent-light: #e3b79a;
+  --color-accent-dark: #8a5a3c;
+  --color-on-dark: #f5ece5;
+  --color-success: #3f7a52;
+  --color-warning: #b3701f;
+  --color-danger: #b23b3b;
+
+  --radius-sm: 0.25rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.9rem;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    background-color: var(--color-cream);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a {
+    color: inherit;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+}
+
+@layer utilities {
+  .skip-link {
+    position: absolute;
+    left: -9999px;
+    top: 0;
+    z-index: 100;
+    background: var(--color-ink);
+    color: var(--color-on-dark);
+    padding: 0.75rem 1.25rem;
+    border-radius: 0 0 var(--radius-sm) 0;
+  }
+
+  .skip-link:focus {
+    left: 0;
+  }
+}

@@ -1,0 +1,352 @@
+// La Lunatique — core product, inventory & identity data model.
+//
+// Datasource is PostgreSQL (local dev connects to a dedicated role/db on
+// a local Postgres instance — see .env). User/Session/Account/Verification
+// below are the standard better-auth schema shape (lib/auth/auth.ts),
+// hand-written to match better-auth 1.7.x's Prisma adapter expectations.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ProductStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+  COMING_SOON
+}
+
+model Category {
+  id          String    @id @default(cuid())
+  slug        String    @unique
+  name        String
+  description String    @default("")
+  sortOrder   Int       @default(0)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  products    Product[]
+}
+
+model Product {
+  id               String    @id @default(cuid())
+  slug             String    @unique
+  name             String
+  shortDescription String    @default("")
+  description      String    @default("")
+
+  categoryId String
+  category   Category @relation(fields: [categoryId], references: [id])
+
+  // Base price in pence. Nullable so a product can exist (as DRAFT) with
+  // pricing still "TBC" — see status below for the purchasability gate.
+  priceInPence          Int?
+  compareAtPriceInPence Int?
+
+  status   ProductStatus @default(DRAFT)
+  featured Boolean       @default(false)
+
+  benefits    String @default("[]") // JSON string[]
+  directions  String @default("[]") // JSON string[]
+  preparation String @default("[]") // JSON string[]
+  warnings    String @default("[]") // JSON string[]
+  ingredients String @default("[]") // JSON string[]
+  faqs        String @default("[]") // JSON {question, answer}[]
+
+  seoTitle       String?
+  seoDescription String?
+
+  // --- Internal/admin-only content-provenance fields.               ---
+  // --- MUST NEVER be exposed to the public-facing product projection. ---
+  contentVerified Boolean @default(false)
+  adminNotes      String  @default("")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  images   ProductImage[]
+  variants Variant[]
+}
+
+model ProductImage {
+  id         String  @id @default(cuid())
+  productId  String
+  product    Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  url        String
+  alt        String
+  isFeatured Boolean @default(false)
+  sortOrder  Int     @default(0)
+}
+
+model Variant {
+  id        String  @id @default(cuid())
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  sku String @unique
+
+  size        String?
+  fragrance   String?
+  tanStrength String?
+
+  // Null means "use the parent product's base/compare-at price".
+  priceOverrideInPence Int?
+  salePriceInPence     Int?
+  // Optional sale window — if either is set, salePriceInPence only
+  // applies between them. Leave both null for an always-on sale price.
+  saleStartsAt DateTime?
+  saleEndsAt   DateTime?
+
+  stockQuantity     Int @default(0)
+  reservedStock     Int @default(0)
+  lowStockThreshold Int @default(10)
+
+  weightGrams Int     @default(0)
+  barcode     String?
+  imageUrl    String?
+
+  // Null = inherit the parent product's ingredients. Set this when a
+  // fragrance/variant genuinely has a different formulation — never
+  // assume two fragrances share an ingredient list by default.
+  ingredients String?
+
+  active Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  stockMovements StockMovement[]
+
+  @@index([productId])
+}
+
+enum StockMovementReason {
+  MANUAL_ADJUSTMENT
+  RESTOCK
+  ORDER_RESERVED
+  ORDER_RELEASED
+  ORDER_COMMITTED
+  RETURN
+  CORRECTION
+}
+
+// Append-only audit trail — every stock change is recorded here rather
+// than only mutating Variant.stockQuantity in place.
+model StockMovement {
+  id        String               @id @default(cuid())
+  variantId String
+  variant   Variant              @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  delta     Int
+  reason    StockMovementReason
+  note      String?
+  createdAt DateTime             @default(now())
+
+  @@index([variantId])
+}
+
+// --- Identity (better-auth) ---------------------------------------------
+//
+// User/Session/Account/Verification are the standard better-auth schema
+// (email+password, database-backed sessions — chosen specifically so
+// logout invalidates the session server-side, not just a JWT expiry).
+// This replaces the old standalone Customer model and the shared
+// admin-access-code system: every person (customer or admin) is a User
+// row, distinguished by `role`. Password hashes live in Account.password
+// (managed entirely by better-auth's own hashing — never touched
+// directly by app code), never in plaintext or anywhere else.
+
+enum UserRole {
+  CUSTOMER
+  ADMIN
+}
+
+model User {
+  id             String    @id @default(cuid())
+  email          String    @unique
+  emailVerified  Boolean   @default(false)
+  name           String
+  phone          String?
+  marketingOptIn Boolean   @default(false)
+  role           UserRole  @default(CUSTOMER)
+  image          String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  sessions  Session[]
+  accounts  Account[]
+  addresses Address[]
+  orders    Order[]
+
+  @@map("user")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String   @unique
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@map("session")
+}
+
+// Credential storage for each sign-in method a user has (email+password
+// today; leaves room for a social provider later without a schema
+// rewrite). `password` here is better-auth's own salted hash — this app
+// never reads or writes it directly.
+model Account {
+  id                    String    @id @default(cuid())
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accountId             String
+  providerId            String
+  issuer                String
+  password              String?
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@index([userId])
+  @@map("account")
+}
+
+// Short-lived tokens for email verification and password reset.
+model Verification {
+  id         String   @id @default(cuid())
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+  @@map("verification")
+}
+
+model NewsletterSubscriber {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  createdAt DateTime @default(now())
+}
+
+// --- Orders --------------------------------------------------------------
+//
+// This is where every real purchase is recorded — customer contact
+// details, shipping address, exact items/prices at time of purchase,
+// and order/payment status. Card details are NEVER stored here or
+// anywhere in this codebase: payment is handled entirely by Stripe
+// (see lib/payments/provider.ts), which returns only a payment
+// reference, never card data, to the app.
+
+model Address {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label     String?
+  name      String
+  line1     String
+  line2     String?
+  city      String
+  postcode  String
+  country   String   @default("United Kingdom")
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+enum OrderStatus {
+  PROCESSING
+  SHIPPED
+  DELIVERED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+}
+
+model Order {
+  id          String  @id @default(cuid())
+  orderNumber String  @unique
+
+  // Nullable — a guest checkout has no User record, but the order still
+  // captures full contact/shipping details directly below so no purchase
+  // data is ever lost regardless of account linkage. Linking a guest
+  // order to an account later requires verified email ownership (see
+  // lib/account/link-orders.ts) — never trust the email field alone.
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id])
+
+  email String
+  phone String?
+
+  shippingName     String
+  shippingLine1    String
+  shippingLine2    String?
+  shippingCity     String
+  shippingPostcode String
+  shippingCountry  String
+
+  status        OrderStatus   @default(PROCESSING)
+  paymentStatus PaymentStatus @default(PENDING)
+
+  subtotalInPence Int
+  discountInPence Int @default(0)
+  shippingInPence Int
+  totalInPence    Int
+
+  trackingNumber String?
+
+  placedAt  DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items          OrderItem[]
+  trackingEvents OrderTrackingEvent[]
+
+  @@index([userId])
+  @@index([email])
+}
+
+model OrderItem {
+  id      String @id @default(cuid())
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  // Snapshot at time of purchase — deliberately not a live reference,
+  // so a later product rename/reprice never rewrites order history.
+  productSlug  String
+  productName  String
+  variantSku   String?
+  variantLabel String?
+
+  qty              Int
+  unitPriceInPence Int
+  lineTotalInPence Int
+}
+
+model OrderTrackingEvent {
+  id      String      @id @default(cuid())
+  orderId String
+  order   Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  status  OrderStatus
+  label   String
+  at      DateTime    @default(now())
+}

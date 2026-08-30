@@ -24,6 +24,8 @@ export const legalLinks: NavLink[] = [
 
 export const supportLinks: NavLink[] = [
   { label: "Track Your Order", href: "/track-order" },
+  { label: "Pricing Guide", href: "/pricing" },
+  { label: "Book a Consultation", href: "/consultation" },
   { label: "FAQ", href: "/faq" },
   { label: "Contact Us", href: "/contact" },
   { label: "My Account", href: "/account" },

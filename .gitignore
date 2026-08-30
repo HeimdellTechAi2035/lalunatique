@@ -26,3 +26,6 @@ next-env.d.ts
 
 # logs
 npm-debug.log*
+
+# Local Netlify folder
+.netlify

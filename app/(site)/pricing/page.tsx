@@ -49,35 +49,28 @@ export default async function PricingGuidePage() {
       </div>
 
       {visibleCategories.length > 0 ? (
-        <div className="mt-10 overflow-x-auto rounded-lg border border-border">
-          <table className="w-full min-w-[480px] text-left text-sm">
-            <thead className="bg-cream text-muted">
-              <tr>
-                <th className="px-4 py-3 font-medium">Category</th>
-                <th className="px-4 py-3 font-medium">Products</th>
-                <th className="px-4 py-3 font-medium">Price range</th>
-              </tr>
-            </thead>
-            <tbody>
-              {visibleCategories.map(({ category, productCount, minPriceInPence, maxPriceInPence }) => (
-                <tr key={category.slug} className="border-t border-border">
-                  <td className="px-4 py-3">
-                    <Link href={`/shop/${category.slug}`} className="font-medium text-ink hover:text-accent">
-                      {category.name}
-                    </Link>
-                  </td>
-                  <td className="px-4 py-3 text-muted">{productCount}</td>
-                  <td className="px-4 py-3 text-ink">
-                    {minPriceInPence != null && maxPriceInPence != null
-                      ? minPriceInPence === maxPriceInPence
-                        ? formatPrice(minPriceInPence)
-                        : `${formatPrice(minPriceInPence)} – ${formatPrice(maxPriceInPence)}`
-                      : "Price TBC"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <div className="mt-10 divide-y divide-border rounded-lg border border-border">
+          {visibleCategories.map(({ category, productCount, minPriceInPence, maxPriceInPence }) => (
+            <Link
+              key={category.slug}
+              href={`/shop/${category.slug}`}
+              className="flex items-center justify-between gap-4 px-4 py-4 hover:bg-cream"
+            >
+              <div>
+                <p className="text-sm font-medium text-ink">{category.name}</p>
+                <p className="text-xs text-muted">
+                  {productCount} product{productCount === 1 ? "" : "s"}
+                </p>
+              </div>
+              <p className="shrink-0 text-sm font-medium text-ink">
+                {minPriceInPence != null && maxPriceInPence != null
+                  ? minPriceInPence === maxPriceInPence
+                    ? formatPrice(minPriceInPence)
+                    : `${formatPrice(minPriceInPence)} – ${formatPrice(maxPriceInPence)}`
+                  : "Price TBC"}
+              </p>
+            </Link>
+          ))}
         </div>
       ) : null}
 

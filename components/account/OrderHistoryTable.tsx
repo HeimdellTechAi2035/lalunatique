@@ -16,35 +16,24 @@ export function OrderHistoryTable({ orders }: { orders: Order[] }) {
   }
 
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full min-w-[500px] text-left text-sm">
-        <thead>
-          <tr className="border-b border-border text-muted">
-            <th className="py-3 font-medium">Order</th>
-            <th className="py-3 font-medium">Date</th>
-            <th className="py-3 font-medium">Status</th>
-            <th className="py-3 font-medium">Total</th>
-            <th className="py-3" />
-          </tr>
-        </thead>
-        <tbody>
-          {orders.map((order) => (
-            <tr key={order.id} className="border-b border-border">
-              <td className="py-4 font-medium text-ink">{order.orderNumber}</td>
-              <td className="py-4 text-muted">{formatDate(order.placedAtIso)}</td>
-              <td className="py-4">
-                <Badge variant={statusVariant[order.status]}>{order.status}</Badge>
-              </td>
-              <td className="py-4 text-ink">{formatPrice(order.totalInPence)}</td>
-              <td className="py-4 text-right">
-                <Link href={`/account/orders/${order.id}`} className="text-sm font-medium text-accent hover:underline">
-                  View
-                </Link>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div className="divide-y divide-border">
+      {orders.map((order) => (
+        <Link
+          key={order.id}
+          href={`/account/orders/${order.id}`}
+          className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 py-4 hover:bg-cream"
+        >
+          <div>
+            <p className="font-medium text-ink">{order.orderNumber}</p>
+            <p className="text-sm text-muted">{formatDate(order.placedAtIso)}</p>
+          </div>
+          <div className="flex items-center gap-3">
+            <Badge variant={statusVariant[order.status]}>{order.status}</Badge>
+            <span className="text-sm font-medium text-ink">{formatPrice(order.totalInPence)}</span>
+            <span className="text-sm font-medium text-accent">View</span>
+          </div>
+        </Link>
+      ))}
     </div>
   );
 }

@@ -30,22 +30,25 @@ function generateTrackingNumber(): string {
  * flips the row, and the second's updateMany matches zero rows and
  * bails out before touching inventory or creating anything.
  */
-export async function finalizeOrderForCheckoutSession(session: Stripe.Checkout.Session): Promise<void> {
-  const checkoutAttemptId = session.metadata?.checkoutAttemptId;
-  if (!checkoutAttemptId) return;
+export async function finalizeOrderForCheckoutSession(
+  session: Stripe.Checkout.Session,
+  transaction?: Prisma.TransactionClient,
+): Promise<void> {
+  const finalize = async (tx: Prisma.TransactionClient) => {
+    const checkoutAttemptId = session.metadata?.checkoutAttemptId;
+    if (!checkoutAttemptId) return;
 
-  const attempt = await prisma.checkoutAttempt.findUnique({
-    where: { id: checkoutAttemptId },
-    include: { lines: true },
-  });
-  if (!attempt) return;
-  if (attempt.status === "COMPLETED") return;
+    const attempt = await tx.checkoutAttempt.findUnique({
+      where: { id: checkoutAttemptId },
+      include: { lines: true },
+    });
+    if (!attempt) return;
+    if (attempt.status === "COMPLETED") return;
 
-  const nowIso = new Date();
-  const orderNumber = generateOrderNumber();
-  const paymentIntentId = typeof session.payment_intent === "string" ? session.payment_intent : session.payment_intent?.id ?? null;
+    const nowIso = new Date();
+    const orderNumber = generateOrderNumber();
+    const paymentIntentId = typeof session.payment_intent === "string" ? session.payment_intent : session.payment_intent?.id ?? null;
 
-  await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     const claim = await tx.checkoutAttempt.updateMany({
       where: { id: checkoutAttemptId, status: "PENDING" },
       data: { status: "COMPLETED" },
@@ -54,57 +57,51 @@ export async function finalizeOrderForCheckoutSession(session: Stripe.Checkout.S
 
     await consumeReservationsForAttempt(tx, checkoutAttemptId, `Order ${orderNumber}`);
 
-    try {
-      await tx.order.create({
-        data: {
-          orderNumber,
-          userId: attempt.userId,
-          checkoutAttemptId: attempt.id,
-          email: attempt.email,
-          phone: attempt.phone,
-          shippingName: attempt.shippingName,
-          shippingLine1: attempt.shippingLine1,
-          shippingLine2: attempt.shippingLine2,
-          shippingCity: attempt.shippingCity,
-          shippingPostcode: attempt.shippingPostcode,
-          shippingCountry: attempt.shippingCountry,
-          status: "PROCESSING",
-          paymentStatus: "PAID",
-          subtotalInPence: attempt.subtotalInPence,
-          discountInPence: attempt.discountInPence,
-          shippingInPence: attempt.shippingInPence,
-          totalInPence: attempt.totalInPence,
-          stripeCheckoutSessionId: session.id,
-          stripePaymentIntentId: paymentIntentId,
-          amountPaidInPence: session.amount_total ?? attempt.totalInPence,
-          paidAt: nowIso,
-          trackingNumber: generateTrackingNumber(),
-          placedAt: nowIso,
-          items: {
-            create: attempt.lines.map((l) => ({
-              productSlug: l.productSlug,
-              productName: l.productName,
-              variantSku: l.variantSku,
-              variantLabel: l.variantLabel,
-              qty: l.qty,
-              unitPriceInPence: l.unitPriceInPence,
-              lineTotalInPence: l.lineTotalInPence,
-            })),
-          },
-          trackingEvents: {
-            create: [{ status: "PROCESSING", label: "Payment confirmed", at: nowIso }],
-          },
+    await tx.order.create({
+      data: {
+        orderNumber,
+        userId: attempt.userId,
+        checkoutAttemptId: attempt.id,
+        email: attempt.email,
+        phone: attempt.phone,
+        shippingName: attempt.shippingName,
+        shippingLine1: attempt.shippingLine1,
+        shippingLine2: attempt.shippingLine2,
+        shippingCity: attempt.shippingCity,
+        shippingPostcode: attempt.shippingPostcode,
+        shippingCountry: attempt.shippingCountry,
+        status: "PROCESSING",
+        paymentStatus: "PAID",
+        subtotalInPence: attempt.subtotalInPence,
+        discountInPence: attempt.discountInPence,
+        shippingInPence: attempt.shippingInPence,
+        totalInPence: attempt.totalInPence,
+        stripeCheckoutSessionId: session.id,
+        stripePaymentIntentId: paymentIntentId,
+        amountPaidInPence: session.amount_total ?? attempt.totalInPence,
+        paidAt: nowIso,
+        trackingNumber: generateTrackingNumber(),
+        placedAt: nowIso,
+        items: {
+          create: attempt.lines.map((l) => ({
+            productSlug: l.productSlug,
+            productName: l.productName,
+            variantSku: l.variantSku,
+            variantLabel: l.variantLabel,
+            qty: l.qty,
+            unitPriceInPence: l.unitPriceInPence,
+            lineTotalInPence: l.lineTotalInPence,
+          })),
         },
-      });
-    } catch (e) {
-      // Defense in depth: the unique constraint on Order.checkoutAttemptId
-      // means even a bug that let two claims through can't create two
-      // orders for the same attempt — the second insert fails here
-      // instead. P2002 = Prisma's unique constraint violation code.
-      if ((e as { code?: string }).code === "P2002") return;
-      throw e;
-    }
-  });
+        trackingEvents: {
+          create: [{ status: "PROCESSING", label: "Payment confirmed", at: nowIso }],
+        },
+      },
+    });
+  };
+
+  if (transaction) return finalize(transaction);
+  await prisma.$transaction(finalize);
 }
 
 /**
@@ -116,11 +113,17 @@ export async function finalizeOrderForCheckoutSession(session: Stripe.Checkout.S
 export async function abandonCheckoutAttempt(
   checkoutAttemptId: string,
   toStatus: "EXPIRED" | "FAILED" | "CANCELED",
-): Promise<void> {
-  const result = await prisma.checkoutAttempt.updateMany({
-    where: { id: checkoutAttemptId, status: "PENDING" },
-    data: { status: toStatus },
-  });
-  if (result.count === 0) return;
-  await releaseReservationsForAttempt(checkoutAttemptId, toStatus === "EXPIRED" ? "EXPIRED" : "RELEASED");
+  transaction?: Prisma.TransactionClient,
+): Promise<boolean> {
+  const abandon = async (tx: Prisma.TransactionClient) => {
+    const result = await tx.checkoutAttempt.updateMany({
+      where: { id: checkoutAttemptId, status: "PENDING" },
+      data: { status: toStatus },
+    });
+    if (result.count === 0) return false;
+    await releaseReservationsForAttempt(checkoutAttemptId, toStatus === "EXPIRED" ? "EXPIRED" : "RELEASED", tx);
+    return true;
+  };
+
+  return transaction ? abandon(transaction) : prisma.$transaction(abandon);
 }

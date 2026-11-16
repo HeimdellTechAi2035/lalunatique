@@ -11,12 +11,8 @@ import { finalizeOrderForCheckoutSession, abandonCheckoutAttempt } from "@/lib/p
  * unsigned or badly-signed POST here can't do anything (see
  * lib/payments/stripe.ts: requireWebhookSecret throws if unconfigured).
  *
- * Event-id deduplication (ProcessedWebhookEvent) happens BEFORE any
- * order/inventory mutation: Stripe guarantees at-least-once delivery,
- * so the same event can legitimately arrive more than once. The id
- * column is the primary key, so a second delivery's insert fails and
- * this returns 200 without reprocessing anything — Stripe should not
- * retry an event this endpoint has already accepted.
+ * The event claim and every fulfillment change commit in one transaction.
+ * A failed delivery rolls back the claim so Stripe can retry it.
  */
 export async function POST(request: NextRequest) {
   const stripe = requireStripe();
@@ -36,48 +32,48 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: `Signature verification failed: ${(err as Error).message}` }, { status: 400 });
   }
 
-  try {
-    await prisma.processedWebhookEvent.create({ data: { id: event.id, type: event.type } });
-  } catch (e) {
-    if ((e as { code?: string }).code === "P2002") {
-      return NextResponse.json({ received: true, duplicate: true });
-    }
-    throw e;
-  }
+  const duplicate = await prisma.$transaction(async (tx) => {
+    const claim = await tx.processedWebhookEvent.createMany({
+      data: { id: event.id, type: event.type },
+      skipDuplicates: true,
+    });
+    if (claim.count === 0) return true;
 
-  switch (event.type) {
-    case "checkout.session.completed":
-    case "checkout.session.async_payment_succeeded": {
-      const session = event.data.object;
-      if (session.payment_status === "paid") {
-        await finalizeOrderForCheckoutSession(session);
+    switch (event.type) {
+      case "checkout.session.completed":
+      case "checkout.session.async_payment_succeeded": {
+        const session = event.data.object;
+        if (session.payment_status === "paid") {
+          await finalizeOrderForCheckoutSession(session, tx);
+        }
+        break;
       }
-      break;
+      case "checkout.session.expired": {
+        const session = event.data.object;
+        const checkoutAttemptId = session.metadata?.checkoutAttemptId;
+        if (checkoutAttemptId) await abandonCheckoutAttempt(checkoutAttemptId, "EXPIRED", tx);
+        break;
+      }
+      case "checkout.session.async_payment_failed": {
+        const session = event.data.object;
+        const checkoutAttemptId = session.metadata?.checkoutAttemptId;
+        if (checkoutAttemptId) await abandonCheckoutAttempt(checkoutAttemptId, "FAILED", tx);
+        break;
+      }
+      case "payment_intent.payment_failed": {
+        const paymentIntent = event.data.object;
+        const checkoutAttemptId = paymentIntent.metadata?.checkoutAttemptId;
+        if (checkoutAttemptId) await abandonCheckoutAttempt(checkoutAttemptId, "FAILED", tx);
+        break;
+      }
+      default:
+        // Every other event type is intentionally ignored — nothing else
+        // in this checkout flow needs it, and staying quiet keeps this
+        // handler's job legible: finalise, expire, or fail an attempt.
+        break;
     }
-    case "checkout.session.expired": {
-      const session = event.data.object;
-      const checkoutAttemptId = session.metadata?.checkoutAttemptId;
-      if (checkoutAttemptId) await abandonCheckoutAttempt(checkoutAttemptId, "EXPIRED");
-      break;
-    }
-    case "checkout.session.async_payment_failed": {
-      const session = event.data.object;
-      const checkoutAttemptId = session.metadata?.checkoutAttemptId;
-      if (checkoutAttemptId) await abandonCheckoutAttempt(checkoutAttemptId, "FAILED");
-      break;
-    }
-    case "payment_intent.payment_failed": {
-      const paymentIntent = event.data.object;
-      const checkoutAttemptId = paymentIntent.metadata?.checkoutAttemptId;
-      if (checkoutAttemptId) await abandonCheckoutAttempt(checkoutAttemptId, "FAILED");
-      break;
-    }
-    default:
-      // Every other event type is intentionally ignored — nothing else
-      // in this checkout flow needs it, and staying quiet keeps this
-      // handler's job legible: finalise, expire, or fail an attempt.
-      break;
-  }
+    return false;
+  });
 
-  return NextResponse.json({ received: true });
+  return NextResponse.json(duplicate ? { received: true, duplicate: true } : { received: true });
 }

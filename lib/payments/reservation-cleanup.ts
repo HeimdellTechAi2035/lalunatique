@@ -1,6 +1,6 @@
 import "server-only";
 import { prisma } from "@/lib/db/prisma";
-import { releaseReservationsForAttempt } from "@/lib/products/inventory";
+import { abandonCheckoutAttempt } from "@/lib/payments/finalize-order";
 
 /**
  * Safety net for reservations whose owning checkout attempt never got a
@@ -9,7 +9,7 @@ import { releaseReservationsForAttempt } from "@/lib/products/inventory";
  * isn't guaranteed to happen at all (endpoint misconfigured, Stripe
  * outage, event lost). Finds every PENDING attempt past its own
  * expiresAt and releases its reservations; safe to run as often as you
- * like since releaseReservationsForAttempt only touches ACTIVE rows.
+ * like since abandonCheckoutAttempt only changes pending attempts.
  *
  * Nothing in this codebase calls this on a schedule — there is no cron
  * runtime here to wire one into. In production, run it periodically
@@ -25,10 +25,10 @@ export async function releaseExpiredReservations(): Promise<{ releasedAttempts: 
     select: { id: true },
   });
 
+  let releasedAttempts = 0;
   for (const attempt of expired) {
-    await releaseReservationsForAttempt(attempt.id, "EXPIRED");
-    await prisma.checkoutAttempt.update({ where: { id: attempt.id }, data: { status: "EXPIRED" } });
+    if (await abandonCheckoutAttempt(attempt.id, "EXPIRED")) releasedAttempts++;
   }
 
-  return { releasedAttempts: expired.length };
+  return { releasedAttempts };
 }

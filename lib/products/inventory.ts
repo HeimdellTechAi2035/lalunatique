@@ -177,19 +177,27 @@ export async function createReservations(
 export async function releaseReservationsForAttempt(
   checkoutAttemptId: string,
   toStatus: "RELEASED" | "EXPIRED" = "RELEASED",
+  transaction?: Prisma.TransactionClient,
 ): Promise<void> {
-  await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+  const release = async (tx: Prisma.TransactionClient) => {
     const active = await tx.inventoryReservation.findMany({
       where: { checkoutAttemptId, status: "ACTIVE" },
     });
     for (const reservation of active) {
+      const claim = await tx.inventoryReservation.updateMany({
+        where: { id: reservation.id, status: "ACTIVE" },
+        data: { status: toStatus },
+      });
+      if (claim.count === 0) continue;
       await tx.variant.update({
         where: { id: reservation.variantId },
         data: { reservedStock: { decrement: reservation.qty } },
       });
-      await tx.inventoryReservation.update({ where: { id: reservation.id }, data: { status: toStatus } });
     }
-  });
+  };
+
+  if (transaction) return release(transaction);
+  await prisma.$transaction(release);
 }
 
 /**

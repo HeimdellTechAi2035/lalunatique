@@ -1,10 +1,18 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import type Stripe from "stripe";
+import { NextRequest } from "next/server";
+import { POST } from "@/app/api/webhooks/stripe/route";
 import { prisma } from "@/lib/db/prisma";
 import { createReservations } from "@/lib/products/inventory";
 import { finalizeOrderForCheckoutSession, abandonCheckoutAttempt } from "@/lib/payments/finalize-order";
 import { resetDb, seedMinimalCatalog } from "./helpers/db";
 import { createUserWithSession } from "./helpers/auth";
+
+const stripeMocks = vi.hoisted(() => ({ constructEvent: vi.fn() }));
+vi.mock("@/lib/payments/stripe", () => ({
+  requireStripe: () => ({ webhooks: stripeMocks }),
+  requireWebhookSecret: () => "synthetic-test-secret",
+}));
 
 /**
  * These tests exercise the exact function the Stripe webhook route
@@ -108,6 +116,33 @@ describe("order finalisation (webhook-driven)", () => {
 
     const variant = await prisma.variant.findUniqueOrThrow({ where: { id: variantId } });
     expect(variant.stockQuantity).toBe(4); // deducted exactly once, not three times
+  });
+
+  it("retries a webhook when fulfillment failed before the event could commit", async () => {
+    const attempt = await makeAttemptWithLine(variantId);
+    const eventId = "evt_test_retry";
+    stripeMocks.constructEvent.mockReturnValue({
+      id: eventId,
+      type: "checkout.session.completed",
+      data: { object: fakeSession(attempt.id) },
+    });
+    const deliver = () => POST(new NextRequest("http://localhost/api/webhooks/stripe", {
+      method: "POST",
+      headers: { "stripe-signature": "synthetic-test-signature" },
+      body: "{}",
+    }));
+
+    await prisma.variant.update({ where: { id: variantId }, data: { stockQuantity: 0 } });
+    await expect(deliver()).rejects.toThrow();
+    expect(await prisma.processedWebhookEvent.findUnique({ where: { id: eventId } })).toBeNull();
+    expect((await prisma.checkoutAttempt.findUniqueOrThrow({ where: { id: attempt.id } })).status).toBe("PENDING");
+
+    await prisma.variant.update({ where: { id: variantId }, data: { stockQuantity: 5 } });
+    const responses = await Promise.all([deliver(), deliver()]);
+    const bodies = await Promise.all(responses.map((response) => response.json()));
+    expect(bodies.filter((body) => body.duplicate)).toHaveLength(1);
+    expect(await prisma.order.count({ where: { checkoutAttemptId: attempt.id } })).toBe(1);
+    expect((await prisma.variant.findUniqueOrThrow({ where: { id: variantId } })).stockQuantity).toBe(4);
   });
 
   it("preserves userId linkage from the checkout attempt (not the order's contact email)", async () => {
